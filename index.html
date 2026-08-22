@@ -803,6 +803,18 @@
         }
       }
 
+      // Dynamic Asset URL resolver for GitHub Pages subpath compatibility
+      function getAppAssetUrl(relativeFilePath) {
+        let basePath = window.location.pathname;
+        if (/\.[a-zA-Z0-9]+$/.test(basePath)) {
+          basePath = basePath.substring(0, basePath.lastIndexOf('/') + 1);
+        } else if (!basePath.endsWith('/')) {
+          basePath = basePath + '/';
+        }
+        const cleanRelative = relativeFilePath.startsWith('/') ? relativeFilePath.slice(1) : relativeFilePath;
+        return window.location.origin + basePath + cleanRelative;
+      }
+
       // Web Worker initiation for Stockfish 18 Engine
       function initStockfishEngine() {
         try {
@@ -815,7 +827,9 @@
           `).removeClass('border-amber-500/20 bg-amber-500/5 text-amber-400')
             .addClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400');
 
-          const sf18WorkerPath = '/stockfish/stockfish-18-lite-single.js';
+          const workerUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.js');
+          const wasmUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.wasm');
+          const sf18WorkerPath = workerUrl + '#' + encodeURIComponent(wasmUrl);
           stockfishWorker = new Worker(sf18WorkerPath);
           stockfishWorker.onmessage = handleEngineMessage;
           stockfishWorker.onerror = function(err) {
@@ -847,7 +861,9 @@
       function initBackgroundAnalysisWorker() {
         if (analysisWorker) return;
         try {
-          const sf18WorkerPath = '/stockfish/stockfish-18-lite-single.js';
+          const workerUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.js');
+          const wasmUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.wasm');
+          const sf18WorkerPath = workerUrl + '#' + encodeURIComponent(wasmUrl);
           analysisWorker = new Worker(sf18WorkerPath);
           analysisWorker.onmessage = handleAnalysisMessage;
           analysisWorker.onerror = function(e) {
@@ -869,7 +885,7 @@
           if (stockfishWorker) {
             try { stockfishWorker.terminate(); } catch(e) {}
           }
-          const asmPath = '/stockfish/stockfish-18-asm.js';
+          const asmPath = getAppAssetUrl('stockfish/stockfish-18-asm.js');
           stockfishWorker = new Worker(asmPath);
           stockfishWorker.onmessage = handleEngineMessage;
           sendEngineCommand('uci');
