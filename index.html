@@ -821,25 +821,25 @@
 
       function getEngineCandidates() {
         return [
-          // 1. Direct GitHub Pages / Raw Repo Structure
-          {
-            name: 'Stockfish 18 WASM (Repo)',
-            js: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.js'),
-            wasm: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.wasm'),
-            isCdn: false
-          },
-          // 2. Official Stockfish 18.0.8 Cloud CDN (Pristine 7.3MB WASM + NNUE neural network)
+          // 1. Official Stockfish 18.0.8 Cloud CDN (Pristine complete 7.3MB WASM + NNUE neural network)
           {
             name: 'Stockfish 18 WASM (CDN)',
             js: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.js',
             wasm: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm',
             isCdn: true
           },
-          // 3. Vite Dev Server / Dist Root Structure
+          // 2. Vite Dev Server / Dist Root Structure
           {
             name: 'Stockfish 18 WASM (Dist)',
             js: getAppAssetUrl('stockfish/stockfish-18-lite-single.js'),
             wasm: getAppAssetUrl('stockfish/stockfish-18-lite-single.wasm'),
+            isCdn: false
+          },
+          // 3. Direct Repo Structure
+          {
+            name: 'Stockfish 18 WASM (Repo)',
+            js: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.js'),
+            wasm: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.wasm'),
             isCdn: false
           },
           // 4. Stockfish 18 ASM.js Fallback
