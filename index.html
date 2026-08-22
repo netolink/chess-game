@@ -765,7 +765,7 @@
 
         if (analysisWorker) {
           analysisWorker.postMessage('position fen ' + currentAnalysisFen);
-          analysisWorker.postMessage('go depth 4');
+          analysisWorker.postMessage('go depth 18');
         } else {
           isAnalyzing = false;
           currentAnalysisFen = null;
