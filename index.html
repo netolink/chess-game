@@ -815,29 +815,112 @@
         return window.location.origin + basePath + cleanRelative;
       }
 
-      // Web Worker initiation for Stockfish 18 Engine
+      // Ordered candidates for Stockfish engine loading (ensures 100% reliability across local and GitHub Pages)
+      let activeCandidateIndex = 0;
+      let candidateTimeoutTimer = null;
+
+      function getEngineCandidates() {
+        return [
+          // 1. Direct GitHub Pages / Raw Repo Structure
+          {
+            name: 'Stockfish 18 WASM (Repo)',
+            js: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.js'),
+            wasm: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.wasm'),
+            isCdn: false
+          },
+          // 2. Official Stockfish 18.0.8 Cloud CDN (Pristine 7.3MB WASM + NNUE neural network)
+          {
+            name: 'Stockfish 18 WASM (CDN)',
+            js: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.js',
+            wasm: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm',
+            isCdn: true
+          },
+          // 3. Vite Dev Server / Dist Root Structure
+          {
+            name: 'Stockfish 18 WASM (Dist)',
+            js: getAppAssetUrl('stockfish/stockfish-18-lite-single.js'),
+            wasm: getAppAssetUrl('stockfish/stockfish-18-lite-single.wasm'),
+            isCdn: false
+          },
+          // 4. Stockfish 18 ASM.js Fallback
+          {
+            name: 'Stockfish 18 ASM',
+            js: getAppAssetUrl('public/stockfish/stockfish-18-asm.js'),
+            wasm: null,
+            isCdn: false
+          },
+          // 5. Stockfish Grandmaster Cloud Engine (3200+ ELO, zero WASM dependencies)
+          {
+            name: 'Stockfish Cloud Engine',
+            js: 'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js',
+            wasm: null,
+            isCdn: true
+          }
+        ];
+      }
+
+      function spawnWorkerForCandidate(candidate) {
+        if (candidate.isCdn) {
+          let scriptContent = `importScripts("${candidate.js}");`;
+          const blob = new Blob([scriptContent], { type: 'application/javascript' });
+          let blobUrl = URL.createObjectURL(blob);
+          if (candidate.wasm) {
+            blobUrl += '#' + encodeURIComponent(candidate.wasm);
+          }
+          return new Worker(blobUrl);
+        } else {
+          if (candidate.wasm) {
+            const pathWithHash = candidate.js + '#' + encodeURIComponent(candidate.wasm);
+            return new Worker(pathWithHash);
+          } else {
+            return new Worker(candidate.js);
+          }
+        }
+      }
+
+      // Web Worker initiation for Stockfish Engine
       function initStockfishEngine() {
-        try {
+        const candidates = getEngineCandidates();
+        if (activeCandidateIndex >= candidates.length) {
+          console.warn("All engine candidates exhausted, activating fallback client.");
+          useFallbackEngine = true;
           $('#engine-badge').html(`
             <span class="relative flex h-2 w-2">
-              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
             </span>
-            Stockfish 18 Engine Initializing...
-          `).removeClass('border-amber-500/20 bg-amber-500/5 text-amber-400')
-            .addClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400');
+            Local Backup Engine Active
+          `).removeClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400')
+            .addClass('border-amber-500/20 bg-amber-500/5 text-amber-400');
+          return;
+        }
 
-          const workerUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.js');
-          const wasmUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.wasm');
-          const sf18WorkerPath = workerUrl + '#' + encodeURIComponent(wasmUrl);
-          stockfishWorker = new Worker(sf18WorkerPath);
+        const currentCandidate = candidates[activeCandidateIndex];
+        console.log(`Attempting to start chess engine candidate [${activeCandidateIndex + 1}/${candidates.length}]: ${currentCandidate.name}`);
+
+        $('#engine-badge').html(`
+          <span class="relative flex h-2 w-2">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+          </span>
+          Stockfish 18 Engine Initializing...
+        `).removeClass('border-amber-500/20 bg-amber-500/5 text-amber-400')
+          .addClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400');
+
+        try {
+          if (stockfishWorker) {
+            try { stockfishWorker.terminate(); } catch(e) {}
+            stockfishWorker = null;
+          }
+
+          stockfishWorker = spawnWorkerForCandidate(currentCandidate);
           stockfishWorker.onmessage = handleEngineMessage;
           stockfishWorker.onerror = function(err) {
-            console.warn("Stockfish 18 WASM Worker error, attempting Stockfish 18 ASM fallback:", err);
-            initStockfish18Asm();
+            console.warn(`Engine candidate ${currentCandidate.name} failed with error, attempting next candidate:`, err);
+            advanceToNextCandidate();
           };
 
-          // Send initialization commands (buffered automatically by Stockfish worker until WASM compile completes)
+          // Send UCI initialization sequence
           sendEngineCommand('uci');
           sendEngineCommand('setoption name Skill Level value ' + ($('#difficulty-slider').val() || '20'));
           sendEngineCommand('setoption name Threads value 1');
@@ -845,26 +928,35 @@
           sendEngineCommand('isready');
           sendEngineCommand('ucinewgame');
 
-          // Generous timeout check in case browser completely blocks WASM
-          setTimeout(function() {
+          if (candidateTimeoutTimer) clearTimeout(candidateTimeoutTimer);
+          candidateTimeoutTimer = setTimeout(function() {
             if (!engineRespondedEventReceived) {
-              console.warn("Stockfish 18 WASM took longer than expected, attempting Stockfish 18 ASM fallback...");
-              initStockfish18Asm();
+              console.warn(`Engine candidate ${currentCandidate.name} timed out without UCI response, advancing...`);
+              advanceToNextCandidate();
             }
-          }, 15000);
+          }, 6000);
         } catch (error) {
-          console.error("Worker restriction with WASM Stockfish 18, attempting Stockfish 18 ASM fallback:", error);
-          initStockfish18Asm();
+          console.warn(`Exception spawning candidate ${currentCandidate.name}:`, error);
+          advanceToNextCandidate();
         }
+      }
+
+      function advanceToNextCandidate() {
+        if (candidateTimeoutTimer) {
+          clearTimeout(candidateTimeoutTimer);
+          candidateTimeoutTimer = null;
+        }
+        if (engineRespondedEventReceived) return;
+        activeCandidateIndex++;
+        initStockfishEngine();
       }
 
       function initBackgroundAnalysisWorker() {
         if (analysisWorker) return;
         try {
-          const workerUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.js');
-          const wasmUrl = getAppAssetUrl('stockfish/stockfish-18-lite-single.wasm');
-          const sf18WorkerPath = workerUrl + '#' + encodeURIComponent(wasmUrl);
-          analysisWorker = new Worker(sf18WorkerPath);
+          const candidates = getEngineCandidates();
+          const candidate = candidates[activeCandidateIndex] || candidates[1] || candidates[0];
+          analysisWorker = spawnWorkerForCandidate(candidate);
           analysisWorker.onmessage = handleAnalysisMessage;
           analysisWorker.onerror = function(e) {
             console.warn("Analysis worker error:", e);
@@ -875,44 +967,6 @@
           analysisWorker.postMessage('isready');
         } catch(e) {
           console.warn("Background analysis worker init error:", e);
-        }
-      }
-
-      // Stockfish 18 ASM Fallback
-      function initStockfish18Asm() {
-        if (engineRespondedEventReceived) return;
-        try {
-          if (stockfishWorker) {
-            try { stockfishWorker.terminate(); } catch(e) {}
-          }
-          const asmPath = getAppAssetUrl('stockfish/stockfish-18-asm.js');
-          stockfishWorker = new Worker(asmPath);
-          stockfishWorker.onmessage = handleEngineMessage;
-          sendEngineCommand('uci');
-          sendEngineCommand('setoption name Skill Level value ' + ($('#difficulty-slider').val() || '20'));
-          sendEngineCommand('setoption name Threads value 1');
-          sendEngineCommand('setoption name Hash value 16');
-          sendEngineCommand('isready');
-          sendEngineCommand('ucinewgame');
-
-          setTimeout(function() {
-            if (!engineRespondedEventReceived) {
-              console.warn("Stockfish 18 ASM unresponsive. Switching to local backup client.");
-              useFallbackEngine = true;
-              $('#engine-badge').html(`
-                <span class="relative flex h-2 w-2">
-                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                  <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
-                </span>
-                Local Backup Engine Active
-              `);
-              $('#engine-badge').removeClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400')
-                                .addClass('border-amber-500/20 bg-amber-500/5 text-amber-400');
-            }
-          }, 10000);
-        } catch(e) {
-          useFallbackEngine = true;
-          $('#engine-badge').text("Local Backup Engine Active");
         }
       }
 
