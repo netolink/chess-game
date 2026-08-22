@@ -549,6 +549,7 @@
       let soundEnabled = false;
       let useFallbackEngine = false;
       let engineRespondedEventReceived = false;
+      let engineStopTimer = null;
       
       // Select coordinate states for click-to-move
       let sourceSquare = null;
@@ -736,7 +737,7 @@
       }
 
       function processAnalysisQueue() {
-        if (isAnalyzing || analysisQueue.length === 0) return;
+        if (isThinking || isAnalyzing || analysisQueue.length === 0) return;
         
         isAnalyzing = true;
         currentAnalysisFen = analysisQueue.shift();
@@ -764,7 +765,7 @@
 
         if (analysisWorker) {
           analysisWorker.postMessage('position fen ' + currentAnalysisFen);
-          analysisWorker.postMessage('go depth 8');
+          analysisWorker.postMessage('go depth 4');
         } else {
           isAnalyzing = false;
           currentAnalysisFen = null;
@@ -822,15 +823,23 @@
               console.warn("Analysis worker error:", e);
             };
             analysisWorker.postMessage('uci');
+            analysisWorker.postMessage('setoption name Threads value 1');
+            analysisWorker.postMessage('setoption name Hash value 8');
             analysisWorker.postMessage('isready');
           } catch(e) {
             console.warn("Background analysis worker init error:", e);
           }
           
-          // Initiate engine setup rules
+          // Initiate engine setup rules, threads, memory, and immediate warm-up
           sendEngineCommand('uci');
           sendEngineCommand('setoption name Skill Level value ' + $('#difficulty-slider').val());
+          sendEngineCommand('setoption name Threads value 1');
+          sendEngineCommand('setoption name Hash value 16');
           sendEngineCommand('isready');
+          sendEngineCommand('ucinewgame');
+          // Warm up engine so WASM compilation and NNUE net are immediately hot in memory:
+          sendEngineCommand('position startpos');
+          sendEngineCommand('go depth 1');
           
           setTimeout(function() {
             if (!engineRespondedEventReceived) {
@@ -856,7 +865,12 @@
           stockfishWorker.onmessage = handleEngineMessage;
           sendEngineCommand('uci');
           sendEngineCommand('setoption name Skill Level value ' + $('#difficulty-slider').val());
+          sendEngineCommand('setoption name Threads value 1');
+          sendEngineCommand('setoption name Hash value 16');
           sendEngineCommand('isready');
+          sendEngineCommand('ucinewgame');
+          sendEngineCommand('position startpos');
+          sendEngineCommand('go depth 1');
           
           if (!analysisWorker) {
             try {
@@ -919,6 +933,10 @@
         }
 
         if (message.startsWith('bestmove')) {
+          if (engineStopTimer) {
+            clearTimeout(engineStopTimer);
+            engineStopTimer = null;
+          }
           const split = message.split(' ');
           const bestMove = split[1];
           if (bestMove && bestMove !== '(none)' && isThinking) {
@@ -1179,6 +1197,11 @@
       function triggerCPUThink() {
         if (game.game_over() || gameTimerExpired) return;
         
+        if (engineStopTimer) {
+          clearTimeout(engineStopTimer);
+          engineStopTimer = null;
+        }
+
         isThinking = true;
         $('#cpu-thinking-spinner').removeClass('hidden');
         $('#player-turn-badge')
@@ -1191,13 +1214,13 @@
           return;
         }
 
-        const skillLvl = parseInt($('#difficulty-slider').val());
+        const skillLvl = parseInt($('#difficulty-slider').val()) || 20;
         sendEngineCommand('setoption name Skill Level value ' + skillLvl);
         sendEngineCommand('position fen ' + game.fen());
 
-        // Select think speed according to slider input
-        const maxThinkS = parseFloat($('#think-time-slider').val());
-        const thinkMs = Math.floor(maxThinkS * 1000);
+        // Select think speed according to slider input (fallback safely to 1.2s if missing)
+        const maxThinkS = parseFloat($('#think-time-slider').val()) || 1.2;
+        const thinkMs = Math.max(Math.floor(maxThinkS * 1000), 200);
         
         if (timeControlPreset !== 'none') {
           let wtimeMs = Math.max(playerTimeRemaining * 1000, 100);
@@ -1208,12 +1231,26 @@
             btimeMs = Math.max(playerTimeRemaining * 1000, 100);
           }
           sendEngineCommand(`go wtime ${wtimeMs} btime ${btimeMs}`);
+          
+          // Safety fallback cutoff in timed games so it never hangs indefinitely
+          const maxClockMs = Math.min(cpuTimeRemaining * 1000 * 0.25, thinkMs + 500);
+          engineStopTimer = setTimeout(function() {
+            if (isThinking && !useFallbackEngine) {
+              sendEngineCommand('stop');
+            }
+          }, Math.max(maxClockMs, 500));
         } else {
           sendEngineCommand('go movetime ' + thinkMs);
+          
+          // Enforce strict time limit: stop calculation if engine exceeds movetime target
+          engineStopTimer = setTimeout(function() {
+            if (isThinking && !useFallbackEngine) {
+              sendEngineCommand('stop');
+            }
+          }, thinkMs + 40);
         }
       }
 
-      // smart local fallback engine in case of offline environments
       // smart local fallback engine in case of offline environments
       function triggerFallbackStrategicEngine() {
         setTimeout(function() {
@@ -1251,6 +1288,11 @@
 
       // Execute calculated engine move
       function executeEngineMove(uciString) {
+        if (engineStopTimer) {
+          clearTimeout(engineStopTimer);
+          engineStopTimer = null;
+        }
+
         sourceSquare = null;
         $('.square-55d63').removeClass('highlight-select');
 
@@ -1278,6 +1320,9 @@
         isThinking = false;
         $('#cpu-thinking-spinner').addClass('hidden');
         updateUI();
+        
+        // Trigger idle analysis now that CPU is done thinking
+        setTimeout(processAnalysisQueue, 80);
       }
 
       // Match state checkers
@@ -1323,6 +1368,13 @@
 
       // Restart match state
       function restartGame() {
+        if (engineStopTimer) {
+          clearTimeout(engineStopTimer);
+          engineStopTimer = null;
+        }
+        sendEngineCommand('stop');
+        sendEngineCommand('ucinewgame');
+
         initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
         // Clear analysis state
         analysisQueue = [];
@@ -1534,6 +1586,14 @@
 
       // Resignation handler
       function resignMatch() {
+        if (engineStopTimer) {
+          clearTimeout(engineStopTimer);
+          engineStopTimer = null;
+        }
+        sendEngineCommand('stop');
+        isThinking = false;
+        $('#cpu-thinking-spinner').addClass('hidden');
+
         clearInterval(clockIntervalId);
         clockIntervalId = null;
         updateClocksUI();
