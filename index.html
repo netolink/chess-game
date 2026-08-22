@@ -271,7 +271,7 @@
               <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
             </span>
-            Stockfish Engine Active
+            Stockfish 18 Engine Active
           </div>
           <button id="theme-toggle-btn" class="h-8 w-8 bg-neutral-900 border border-neutral-800 rounded-lg flex items-center justify-center text-neutral-400 hover:text-white transition cursor-pointer" title="Toggle Light/Dark Theme">
             <i id="theme-icon" class="fa-solid fa-sun"></i>
@@ -535,7 +535,7 @@
 
     <!-- Footer System Specifications -->
     <footer class="border-t border-neutral-900 py-4 px-6 text-center text-[10px] text-neutral-500 font-mono tracking-wide">
-      ENG: STOCKFISH.JS v18 (WASM) via GitHub Assets // CHESSBOARD.JS v1.0 // CHESS.JS // LOCAL SYNTHESIZED SOUNDS
+      ENG: STOCKFISH 18 (WASM / NNUE) // CHESSBOARD.JS v1.0 // CHESS.JS // LOCAL SYNTHESIZED SOUNDS
     </footer>
 
     <!-- JS Core Engine Script -->
@@ -802,21 +802,30 @@
         }
       }
 
-      // Web Worker initiation for Stockfish Engine
+      // Web Worker initiation for Stockfish 18 Engine
       function initStockfishEngine() {
         try {
-          // Use standard CDN distribution of stockfish.js
-          const blobCode = `importScripts("https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js");`;
-          const blob = new Blob([blobCode], { type: 'application/javascript' });
-          const workerURL = URL.createObjectURL(blob);
-          stockfishWorker = new Worker(workerURL);
+          // Stockfish 18 WASM worker
+          const sf18WorkerPath = '/stockfish/stockfish-18-lite-single.js';
+          stockfishWorker = new Worker(sf18WorkerPath);
           stockfishWorker.onmessage = handleEngineMessage;
+          stockfishWorker.onerror = function(err) {
+            console.warn("Stockfish 18 WASM Worker error, attempting Stockfish 18 ASM fallback:", err);
+            initStockfish18Asm();
+          };
 
-          // Background analysis worker
-          analysisWorker = new Worker(workerURL);
-          analysisWorker.onmessage = handleAnalysisMessage;
-          analysisWorker.postMessage('uci');
-          analysisWorker.postMessage('isready');
+          // Background analysis worker (Stockfish 18)
+          try {
+            analysisWorker = new Worker(sf18WorkerPath);
+            analysisWorker.onmessage = handleAnalysisMessage;
+            analysisWorker.onerror = function(e) {
+              console.warn("Analysis worker error:", e);
+            };
+            analysisWorker.postMessage('uci');
+            analysisWorker.postMessage('isready');
+          } catch(e) {
+            console.warn("Background analysis worker init error:", e);
+          }
           
           // Initiate engine setup rules
           sendEngineCommand('uci');
@@ -825,15 +834,55 @@
           
           setTimeout(function() {
             if (!engineRespondedEventReceived) {
-              console.warn("Stockfish worker unresponsive. Switching to local smart fallback client.");
+              console.warn("Stockfish 18 WASM not responding in time, attempting Stockfish 18 ASM fallback...");
+              initStockfish18Asm();
+            }
+          }, 3500);
+        } catch (error) {
+          console.error("Worker restriction with WASM Stockfish 18, attempting Stockfish 18 ASM fallback:", error);
+          initStockfish18Asm();
+        }
+      }
+
+      // Stockfish 18 ASM Fallback
+      function initStockfish18Asm() {
+        if (engineRespondedEventReceived) return;
+        try {
+          if (stockfishWorker) {
+            try { stockfishWorker.terminate(); } catch(e) {}
+          }
+          const asmPath = '/stockfish/stockfish-18-asm.js';
+          stockfishWorker = new Worker(asmPath);
+          stockfishWorker.onmessage = handleEngineMessage;
+          sendEngineCommand('uci');
+          sendEngineCommand('setoption name Skill Level value ' + $('#difficulty-slider').val());
+          sendEngineCommand('isready');
+          
+          if (!analysisWorker) {
+            try {
+              analysisWorker = new Worker(asmPath);
+              analysisWorker.onmessage = handleAnalysisMessage;
+              analysisWorker.postMessage('uci');
+              analysisWorker.postMessage('isready');
+            } catch(e) {}
+          }
+
+          setTimeout(function() {
+            if (!engineRespondedEventReceived) {
+              console.warn("Stockfish 18 ASM unresponsive. Switching to local backup client.");
               useFallbackEngine = true;
-              $('#engine-badge').text("Local Backup Engine Active");
+              $('#engine-badge').html(`
+                <span class="relative flex h-2 w-2">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                </span>
+                Local Backup Engine Active
+              `);
               $('#engine-badge').removeClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400')
                                 .addClass('border-amber-500/20 bg-amber-500/5 text-amber-400');
             }
-          }, 4500);
-        } catch (error) {
-          console.error("Worker restriction:", error);
+          }, 4000);
+        } catch(e) {
           useFallbackEngine = true;
           $('#engine-badge').text("Local Backup Engine Active");
         }
@@ -852,6 +901,18 @@
         const message = event.data;
         console.log("UCI Engine Statement: " + message);
         engineRespondedEventReceived = true;
+
+        if (message.startsWith('id name Stockfish')) {
+          $('#engine-badge').html(`
+            <span class="relative flex h-2 w-2">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            Stockfish 18 Engine Active
+          `);
+          $('#engine-badge').removeClass('border-amber-500/20 bg-amber-500/5 text-amber-400')
+                            .addClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400');
+        }
 
         if (message.includes('score cp') || message.includes('score mate')) {
           parseEvaluationStream(message);
