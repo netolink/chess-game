@@ -806,7 +806,15 @@
       // Web Worker initiation for Stockfish 18 Engine
       function initStockfishEngine() {
         try {
-          // Stockfish 18 WASM worker
+          $('#engine-badge').html(`
+            <span class="relative flex h-2 w-2">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            Stockfish 18 Engine Initializing...
+          `).removeClass('border-amber-500/20 bg-amber-500/5 text-amber-400')
+            .addClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400');
+
           const sf18WorkerPath = '/stockfish/stockfish-18-lite-single.js';
           stockfishWorker = new Worker(sf18WorkerPath);
           stockfishWorker.onmessage = handleEngineMessage;
@@ -815,41 +823,42 @@
             initStockfish18Asm();
           };
 
-          // Background analysis worker (Stockfish 18)
-          try {
-            analysisWorker = new Worker(sf18WorkerPath);
-            analysisWorker.onmessage = handleAnalysisMessage;
-            analysisWorker.onerror = function(e) {
-              console.warn("Analysis worker error:", e);
-            };
-            analysisWorker.postMessage('uci');
-            analysisWorker.postMessage('setoption name Threads value 1');
-            analysisWorker.postMessage('setoption name Hash value 8');
-            analysisWorker.postMessage('isready');
-          } catch(e) {
-            console.warn("Background analysis worker init error:", e);
-          }
-          
-          // Initiate engine setup rules, threads, memory, and immediate warm-up
+          // Send initialization commands (buffered automatically by Stockfish worker until WASM compile completes)
           sendEngineCommand('uci');
-          sendEngineCommand('setoption name Skill Level value ' + $('#difficulty-slider').val());
+          sendEngineCommand('setoption name Skill Level value ' + ($('#difficulty-slider').val() || '20'));
           sendEngineCommand('setoption name Threads value 1');
           sendEngineCommand('setoption name Hash value 16');
           sendEngineCommand('isready');
           sendEngineCommand('ucinewgame');
-          // Warm up engine so WASM compilation and NNUE net are immediately hot in memory:
-          sendEngineCommand('position startpos');
-          sendEngineCommand('go depth 1');
-          
+
+          // Generous timeout check in case browser completely blocks WASM
           setTimeout(function() {
             if (!engineRespondedEventReceived) {
-              console.warn("Stockfish 18 WASM not responding in time, attempting Stockfish 18 ASM fallback...");
+              console.warn("Stockfish 18 WASM took longer than expected, attempting Stockfish 18 ASM fallback...");
               initStockfish18Asm();
             }
-          }, 3500);
+          }, 15000);
         } catch (error) {
           console.error("Worker restriction with WASM Stockfish 18, attempting Stockfish 18 ASM fallback:", error);
           initStockfish18Asm();
+        }
+      }
+
+      function initBackgroundAnalysisWorker() {
+        if (analysisWorker) return;
+        try {
+          const sf18WorkerPath = '/stockfish/stockfish-18-lite-single.js';
+          analysisWorker = new Worker(sf18WorkerPath);
+          analysisWorker.onmessage = handleAnalysisMessage;
+          analysisWorker.onerror = function(e) {
+            console.warn("Analysis worker error:", e);
+          };
+          analysisWorker.postMessage('uci');
+          analysisWorker.postMessage('setoption name Threads value 1');
+          analysisWorker.postMessage('setoption name Hash value 8');
+          analysisWorker.postMessage('isready');
+        } catch(e) {
+          console.warn("Background analysis worker init error:", e);
         }
       }
 
@@ -864,22 +873,11 @@
           stockfishWorker = new Worker(asmPath);
           stockfishWorker.onmessage = handleEngineMessage;
           sendEngineCommand('uci');
-          sendEngineCommand('setoption name Skill Level value ' + $('#difficulty-slider').val());
+          sendEngineCommand('setoption name Skill Level value ' + ($('#difficulty-slider').val() || '20'));
           sendEngineCommand('setoption name Threads value 1');
           sendEngineCommand('setoption name Hash value 16');
           sendEngineCommand('isready');
           sendEngineCommand('ucinewgame');
-          sendEngineCommand('position startpos');
-          sendEngineCommand('go depth 1');
-          
-          if (!analysisWorker) {
-            try {
-              analysisWorker = new Worker(asmPath);
-              analysisWorker.onmessage = handleAnalysisMessage;
-              analysisWorker.postMessage('uci');
-              analysisWorker.postMessage('isready');
-            } catch(e) {}
-          }
 
           setTimeout(function() {
             if (!engineRespondedEventReceived) {
@@ -895,7 +893,7 @@
               $('#engine-badge').removeClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400')
                                 .addClass('border-amber-500/20 bg-amber-500/5 text-amber-400');
             }
-          }, 4000);
+          }, 10000);
         } catch(e) {
           useFallbackEngine = true;
           $('#engine-badge').text("Local Backup Engine Active");
@@ -913,10 +911,11 @@
       // Stream evaluation and bestmoves from stockfish output
       function handleEngineMessage(event) {
         const message = event.data;
+        if (typeof message !== 'string') return;
         console.log("UCI Engine Statement: " + message);
         engineRespondedEventReceived = true;
 
-        if (message.startsWith('id name Stockfish')) {
+        if (message.startsWith('id name Stockfish') || message.startsWith('Stockfish 18') || message === 'uciok' || message === 'readyok') {
           $('#engine-badge').html(`
             <span class="relative flex h-2 w-2">
               <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -926,6 +925,10 @@
           `);
           $('#engine-badge').removeClass('border-amber-500/20 bg-amber-500/5 text-amber-400')
                             .addClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400');
+          useFallbackEngine = false;
+
+          // Initialize background analysis worker lazily
+          setTimeout(initBackgroundAnalysisWorker, 500);
         }
 
         if (message.includes('score cp') || message.includes('score mate')) {
@@ -1242,16 +1245,16 @@
         } else {
           sendEngineCommand('go movetime ' + thinkMs);
           
-          // Enforce strict time limit: stop calculation if engine exceeds movetime target
+          // Safety timeout cutoff in case of unusual delays
           engineStopTimer = setTimeout(function() {
             if (isThinking && !useFallbackEngine) {
               sendEngineCommand('stop');
             }
-          }, thinkMs + 40);
+          }, thinkMs + 500);
         }
       }
 
-      // smart local fallback engine in case of offline environments
+      // Smart local fallback engine in case worker is unavailable
       function triggerFallbackStrategicEngine() {
         setTimeout(function() {
           if (!isThinking) return;
@@ -1267,23 +1270,14 @@
           }
 
           if (selection) {
-            const move = game.move(selection);
-            if (move) {
-              if (move.captured) {
-                AudioSFX.playCapture();
-              } else {
-                AudioSFX.playMove();
-              }
-              board.position(game.fen(), true);
-              highlightSquares(move.from, move.to);
-              checkCheckmateTriggers();
-            }
+            const uci = selection.from + selection.to + (selection.promotion || '');
+            executeEngineMove(uci);
+          } else {
+            isThinking = false;
+            $('#cpu-thinking-spinner').addClass('hidden');
+            updateUI();
           }
-
-          isThinking = false;
-          $('#cpu-thinking-spinner').addClass('hidden');
-          updateUI();
-        }, 800);
+        }, 600);
       }
 
       // Execute calculated engine move
