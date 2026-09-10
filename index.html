@@ -550,6 +550,7 @@
       let useFallbackEngine = false;
       let engineRespondedEventReceived = false;
       let engineStopTimer = null;
+      let engineReady = false;
       
       // Select coordinate states for click-to-move
       let sourceSquare = null;
@@ -609,6 +610,10 @@
         // Single Click-to-Move Delegation bound to the #myBoard parent block
         $('#myBoard').on('click', '.square-55d63', function(e) {
           if (game.game_over() || isThinking || gameTimerExpired) return;
+          if (!engineReady) {
+            showToast("Engine is still loading, please wait…", "warning");
+            return;
+          }
 
           const square = $(this).data('square');
           if (!square) return;
@@ -732,6 +737,7 @@
         if (!fen) return;
         if (bestMoveCache[fen]) return;
         if (analysisQueue.includes(fen)) return;
+        if (analysisQueue.length >= 3) return;
         analysisQueue.push(fen);
         processAnalysisQueue();
       }
@@ -765,7 +771,7 @@
 
         if (analysisWorker) {
           analysisWorker.postMessage('position fen ' + currentAnalysisFen);
-          analysisWorker.postMessage('go depth 18');
+          analysisWorker.postMessage('go depth 12');
         } else {
           isAnalyzing = false;
           currentAnalysisFen = null;
@@ -821,35 +827,34 @@
 
       function getEngineCandidates() {
         return [
-          // 1. Official Stockfish 18.0.8 Cloud CDN (Pristine complete 7.3MB WASM + NNUE neural network)
-          {
-            name: 'Stockfish 18 WASM (CDN)',
-            js: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.js',
-            wasm: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm',
-            isCdn: true
-          },
-          // 2. Vite Dev Server / Dist Root Structure
+          // Prefer local/dist assets first (more reliable on GitHub Pages than CDN blob workers)
           {
             name: 'Stockfish 18 WASM (Dist)',
             js: getAppAssetUrl('stockfish/stockfish-18-lite-single.js'),
             wasm: getAppAssetUrl('stockfish/stockfish-18-lite-single.wasm'),
             isCdn: false
           },
-          // 3. Direct Repo Structure
           {
             name: 'Stockfish 18 WASM (Repo)',
             js: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.js'),
             wasm: getAppAssetUrl('public/stockfish/stockfish-18-lite-single.wasm'),
             isCdn: false
           },
-          // 4. Stockfish 18 ASM.js Fallback
+          // Official Stockfish 18.0.8 Cloud CDN (backup)
+          {
+            name: 'Stockfish 18 WASM (CDN)',
+            js: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.js',
+            wasm: 'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-lite-single.wasm',
+            isCdn: true
+          },
+          // Stockfish 18 ASM.js Fallback
           {
             name: 'Stockfish 18 ASM',
             js: getAppAssetUrl('public/stockfish/stockfish-18-asm.js'),
             wasm: null,
             isCdn: false
           },
-          // 5. Stockfish Grandmaster Cloud Engine (3200+ ELO, zero WASM dependencies)
+          // Stockfish Grandmaster Cloud Engine (zero WASM dependencies)
           {
             name: 'Stockfish Cloud Engine',
             js: 'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js',
@@ -884,6 +889,7 @@
         if (activeCandidateIndex >= candidates.length) {
           console.warn("All engine candidates exhausted, activating fallback client.");
           useFallbackEngine = true;
+          engineReady = true;
           $('#engine-badge').html(`
             <span class="relative flex h-2 w-2">
               <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
@@ -996,6 +1002,7 @@
           $('#engine-badge').removeClass('border-amber-500/20 bg-amber-500/5 text-amber-400')
                             .addClass('border-emerald-500/20 bg-emerald-500/5 text-emerald-400');
           useFallbackEngine = false;
+          engineReady = true;
 
           // Initialize background analysis worker lazily
           setTimeout(initBackgroundAnalysisWorker, 500);
@@ -1012,10 +1019,35 @@
           }
           const split = message.split(' ');
           const bestMove = split[1];
-          if (bestMove && bestMove !== '(none)' && isThinking) {
+          if (!isThinking) return;
+          if (bestMove && bestMove !== '(none)') {
             executeEngineMove(bestMove);
+          } else {
+            // Engine returned no move — never leave the board locked
+            clearThinkingState();
+            checkCheckmateTriggers();
           }
         }
+      }
+
+      function clearThinkingState() {
+        isThinking = false;
+        $('#cpu-thinking-spinner').addClass('hidden');
+        updateUI();
+        setTimeout(processAnalysisQueue, 80);
+      }
+
+      function forceRecoverFromStuckEngine() {
+        if (!isThinking) return;
+        console.warn('Engine stuck — recovering with a fallback move.');
+        const choices = game.moves({ verbose: true });
+        if (choices.length === 0) {
+          clearThinkingState();
+          checkCheckmateTriggers();
+          return;
+        }
+        const selection = choices[Math.floor(Math.random() * choices.length)];
+        executeEngineMove(selection.from + selection.to + (selection.promotion || 'q'));
       }
 
       // Parse score evaluation centipawns
@@ -1070,7 +1102,11 @@
       // Block dragging pieces that aren't the user's turn
       function handleDragStart(source, piece, position, orientation) {
         if (game.game_over() || gameTimerExpired || isThinking) return false;
-        
+        if (!engineReady) {
+          showToast("Engine is still loading, please wait…", "warning");
+          return false;
+        }
+
         const targetSideColor = currentSide.charAt(0);
         if (piece.charAt(0) !== targetSideColor) return false;
         if (game.turn() !== targetSideColor) return false;
@@ -1093,6 +1129,10 @@
 
         clearLegalMoves();
         if (game.game_over() || gameTimerExpired || isThinking) return 'snapback';
+        if (!engineReady) {
+          showToast("Engine is still loading, please wait…", "warning");
+          return 'snapback';
+        }
 
         const moves = game.moves({ verbose: true });
         const requiresPromotion = moves.some(m => {
@@ -1282,7 +1322,12 @@
           .removeClass('bg-slate-800 text-slate-100 border-slate-700 bg-emerald-500/5 text-emerald-400 border-emerald-500/20')
           .addClass('bg-indigo-950 text-indigo-300 border-indigo-500/30 animate-pulse');
 
-        if (useFallbackEngine) {
+        // Pause background analysis so the game engine gets full CPU
+        if (analysisWorker) {
+          try { analysisWorker.postMessage('stop'); } catch (e) {}
+        }
+
+        if (useFallbackEngine || !engineReady || !stockfishWorker) {
           triggerFallbackStrategicEngine();
           return;
         }
@@ -1294,34 +1339,36 @@
         // Select think speed according to slider input (fallback safely to 1.2s if missing)
         const maxThinkS = parseFloat($('#think-time-slider').val()) || 1.2;
         const thinkMs = Math.max(Math.floor(maxThinkS * 1000), 200);
-        
+
         if (timeControlPreset !== 'none') {
           let wtimeMs = Math.max(playerTimeRemaining * 1000, 100);
           let btimeMs = Math.max(cpuTimeRemaining * 1000, 100);
-          
+
           if (currentSide === 'black') {
             wtimeMs = Math.max(cpuTimeRemaining * 1000, 100);
             btimeMs = Math.max(playerTimeRemaining * 1000, 100);
           }
           sendEngineCommand(`go wtime ${wtimeMs} btime ${btimeMs}`);
-          
-          // Safety fallback cutoff in timed games so it never hangs indefinitely
+
           const maxClockMs = Math.min(cpuTimeRemaining * 1000 * 0.25, thinkMs + 500);
-          engineStopTimer = setTimeout(function() {
-            if (isThinking && !useFallbackEngine) {
-              sendEngineCommand('stop');
-            }
-          }, Math.max(maxClockMs, 500));
+          armEngineWatchdog(Math.max(maxClockMs, 500));
         } else {
           sendEngineCommand('go movetime ' + thinkMs);
-          
-          // Safety timeout cutoff in case of unusual delays
-          engineStopTimer = setTimeout(function() {
-            if (isThinking && !useFallbackEngine) {
-              sendEngineCommand('stop');
-            }
-          }, thinkMs + 500);
+          armEngineWatchdog(thinkMs);
         }
+      }
+
+      // Two-stage watchdog: ask Stockfish to stop, then force a move if it never answers
+      function armEngineWatchdog(thinkMs) {
+        if (engineStopTimer) clearTimeout(engineStopTimer);
+        engineStopTimer = setTimeout(function() {
+          if (!isThinking || useFallbackEngine) return;
+          sendEngineCommand('stop');
+          engineStopTimer = setTimeout(function() {
+            if (!isThinking) return;
+            forceRecoverFromStuckEngine();
+          }, 1000);
+        }, thinkMs + 800);
       }
 
       // Smart local fallback engine in case worker is unavailable
@@ -1329,7 +1376,11 @@
         setTimeout(function() {
           if (!isThinking) return;
           const choices = game.moves({ verbose: true });
-          if (choices.length === 0) return;
+          if (choices.length === 0) {
+            clearThinkingState();
+            checkCheckmateTriggers();
+            return;
+          }
 
           const captures = choices.filter(m => m.captured || m.san.includes('+'));
           let selection = null;
@@ -1340,12 +1391,10 @@
           }
 
           if (selection) {
-            const uci = selection.from + selection.to + (selection.promotion || '');
+            const uci = selection.from + selection.to + (selection.promotion || 'q');
             executeEngineMove(uci);
           } else {
-            isThinking = false;
-            $('#cpu-thinking-spinner').addClass('hidden');
-            updateUI();
+            clearThinkingState();
           }
         }, 600);
       }
@@ -1379,14 +1428,25 @@
           board.position(game.fen(), true);
           highlightSquares(from, to);
           checkCheckmateTriggers();
+        } else {
+          // Illegal engine move — recover instead of freezing
+          const choices = game.moves({ verbose: true });
+          if (choices.length > 0) {
+            const selection = choices[Math.floor(Math.random() * choices.length)];
+            const fb = game.move({
+              from: selection.from,
+              to: selection.to,
+              promotion: selection.promotion || 'q'
+            });
+            if (fb) {
+              board.position(game.fen(), true);
+              highlightSquares(fb.from, fb.to);
+              checkCheckmateTriggers();
+            }
+          }
         }
 
-        isThinking = false;
-        $('#cpu-thinking-spinner').addClass('hidden');
-        updateUI();
-        
-        // Trigger idle analysis now that CPU is done thinking
-        setTimeout(processAnalysisQueue, 80);
+        clearThinkingState();
       }
 
       // Match state checkers
@@ -1842,10 +1902,13 @@
 
           const fen1 = fens[i];
           const fen2 = fens[i + 1];
+          const isLastRow = (i + 2 >= moves.length);
 
-          // Trigger background analysis if not cached
-          if (fen1) enqueueAnalysis(fen1);
-          if (p2 && fen2) enqueueAnalysis(fen2);
+          // Only analyze the latest ply — full-history depth search froze the game engine
+          if (isLastRow) {
+            if (fen1) enqueueAnalysis(fen1);
+            if (p2 && fen2) enqueueAnalysis(fen2);
+          }
 
           const best1 = bestMoveCache[fen1] ? `(Best: ${bestMoveCache[fen1]})` : '(eval...)';
           const best2 = p2 ? (bestMoveCache[fen2] ? `(Best: ${bestMoveCache[fen2]})` : '(eval...)') : '';
