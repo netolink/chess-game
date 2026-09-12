@@ -1,6 +1,6 @@
 {
-  "name": "Chess vs Stockfish",
-  "description": "A high-performance responsive web chess game against Stockfish 18 (Web Worker/WASM) with customizable difficulties, active evaluation, and move history.",
+  "name": "Chess Game",
+  "description": "A refined, high-performance web chess game with clean minimalist design, Stockfish evaluation, tactical controls, and move history.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
